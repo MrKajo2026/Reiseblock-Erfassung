@@ -116,7 +116,7 @@ const SUPABASE_URL = 'https://csvswawhnmmilhogsqql.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNzdnN3YXdobm1taWxob2dzcXFsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyMTU5MjgsImV4cCI6MjEwNDc5MTkyOH0.XFBB44Ag3-I3kWRrAp-z4x8f_hIirqfdAnKZo2ijyo8';
 
 /* ---------- Schema ---------- */
-const TYPES = 
+const TYPES = {
   hotel:   {label:'Hotel', crit:['Lage','Zimmer & Schlaf','Frühstück & Service','Preis-Leistung'], cat:'unterkunft', priceLabel:'Preis pro Nacht für 2'},
   gastro:  {label:'Restaurant / Café / Bar', crit:['Essen & Getränke','Atmosphäre','Service','Preis-Leistung'], cat:'essen', priceLabel:'Preis für 2 (mit Getränken)'},
   ausflug: {label:'Ausflug / Aktivität', crit:['Erlebnis','Aufwand (Anfahrt, Zeit)','Organisation & Buchung','Preis-Leistung'], cat:'aktiv', priceLabel:'Preis für 2'},
