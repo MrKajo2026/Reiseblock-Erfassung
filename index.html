@@ -203,6 +203,9 @@ code{font-size:13px;background:var(--bg);border-radius:6px;padding:1px 6px}
   .foot .in{max-width:680px}
 }
 
+.tile .th{cursor:pointer}
+.tile .tin{border-top:1px solid var(--line);margin-top:6px;padding-top:14px}
+.tile.open{box-shadow:0 0 0 1px var(--line)}
 .sec{padding:10px 0;border-top:1px solid var(--line)}
 .sec:first-child{border-top:0;padding-top:4px}
 .sec .lab{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
@@ -219,7 +222,7 @@ code{font-size:13px;background:var(--bg);border-radius:6px;padding:1px 6px}
 <script src="leaflet.js"></script>
 <script>
 const SUPABASE_URL = 'https://csvswawhnmmilhogsqql.supabase.co';
-const VERSION = '2026.09.12.05';
+const VERSION = '2026.09.13.01';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNzdnN3YXdobm1taWxob2dzcXFsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyMTU5MjgsImV4cCI6MjEwNDc5MTkyOH0.XFBB44Ag3-I3kWRrAp-z4x8f_hIirqfdAnKZo2ijyo8';
 
 /* ---------- Schema ---------- */
@@ -390,10 +393,21 @@ function subscribe(){
 /* Fotos */
 function resizeImage(file,max=1600,q=0.82){ return new Promise((res,rej)=>{ const img=new Image(); const url=URL.createObjectURL(file); img.onload=()=>{ let w=img.naturalWidth,h=img.naturalHeight; const s=Math.min(1,max/Math.max(w,h)); w=Math.round(w*s); h=Math.round(h*s); const c=document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(img,0,0,w,h); c.toBlob(b=>{ URL.revokeObjectURL(url); b?res(b):rej(new Error('Bild konnte nicht verarbeitet werden')); },'image/jpeg',q); }; img.onerror=()=>{ URL.revokeObjectURL(url); rej(new Error('Bild nicht lesbar')); }; img.src=url; }); }
 let photoTarget=null; // {obj, id}
+function readExif(buf){ try{ const v=new DataView(buf); if(v.getUint16(0)!==0xFFD8) return null; let off=2; while(off+4<v.byteLength){ const marker=v.getUint16(off); if(marker===0xFFE1){ const len=v.getUint16(off+2); if(v.getUint32(off+4)===0x45786966) return parseTiff(v,off+10); off+=2+len; } else if((marker&0xFF00)!==0xFF00||marker===0xFFDA) return null; else off+=2+v.getUint16(off+2); } }catch(e){} return null; }
+function parseTiff(v,start){ const le=v.getUint16(start)===0x4949; const u16=o=>v.getUint16(o,le), u32=o=>v.getUint32(o,le); const out={};
+  const readIfd=(o,cb)=>{ const n=u16(start+o); for(let i=0;i<n;i++){ const e=start+o+2+i*12; const tag=u16(e), type=u16(e+2), cnt=u32(e+4); const size={1:1,2:1,3:2,4:4,5:8,7:1,9:4,10:8}[type]||1; const vo=(size*cnt>4)?start+u32(e+8):e+8; cb(tag,type,cnt,vo); } };
+  const str=(vo,cnt)=>{ let s=''; for(let i=0;i<cnt;i++){ const c=v.getUint8(vo+i); if(!c) break; s+=String.fromCharCode(c); } return s; };
+  const rat=(vo,i)=>{ const d=u32(vo+i*8+4); return d?u32(vo+i*8)/d:0; };
+  let exifOff=null,gpsOff=null;
+  readIfd(u32(start+4),(tag,type,cnt,vo)=>{ if(tag===0x8769) exifOff=u32(vo); if(tag===0x8825) gpsOff=u32(vo); if(tag===0x0132) out.dt=str(vo,cnt); });
+  if(exifOff) readIfd(exifOff,(tag,type,cnt,vo)=>{ if(tag===0x9003) out.dto=str(vo,cnt); });
+  if(gpsOff){ let latRef,lngRef,lat,lng; readIfd(gpsOff,(tag,type,cnt,vo)=>{ if(tag===1) latRef=String.fromCharCode(v.getUint8(vo)); if(tag===3) lngRef=String.fromCharCode(v.getUint8(vo)); if(tag===2&&type===5) lat=rat(vo,0)+rat(vo,1)/60+rat(vo,2)/3600; if(tag===4&&type===5) lng=rat(vo,0)+rat(vo,1)/60+rat(vo,2)/3600; }); if(lat!=null&&lng!=null&&(lat||lng)){ out.lat=latRef==='S'?-lat:lat; out.lng=lngRef==='W'?-lng:lng; } }
+  const d=(out.dto||out.dt||''); if(/^\d{4}:\d{2}:\d{2}/.test(d)) out.date=d.slice(0,10).replace(/:/g,'-'); return out; }
 async function addPhotos(files){
   const tg=photoTarget; if(!tg) return; let failed=false;
-  for(const f of files){ try{ setSync('Foto wird hochgeladen …'); const blob=await resizeImage(f); const path=`${view.tripId}/${tg.id}/${uid()}.jpg`; const {error}=await sb.storage.from('fotos').upload(path, blob, {contentType:'image/jpeg', upsert:false}); if(error) throw error; tg.obj.photos.push({path, name:f.name}); }catch(e){ failed=true; setSync('Foto fehlgeschlagen: '+(e.message||e),'err'); } }
-  if(!failed) setSync('Fotos hochgeladen','warn'); await renderThumbs();
+  let gps=0, n=0;
+  for(const f of files){ try{ setSync('Foto wird hochgeladen …'); let ex=null; try{ ex=readExif(await f.slice(0,262144).arrayBuffer()); }catch(e){} const blob=await resizeImage(f); const path=`${view.tripId}/${tg.id}/${uid()}.jpg`; const {error}=await sb.storage.from('fotos').upload(path, blob, {contentType:'image/jpeg', upsert:false}); if(error) throw error; const rec={path, name:f.name}; if(ex){ if(ex.lat!=null){ rec.lat=Math.round(ex.lat*100000)/100000; rec.lng=Math.round(ex.lng*100000)/100000; gps++; } if(ex.date) rec.date=ex.date; } n++; tg.obj.photos.push(rec); }catch(e){ failed=true; setSync('Foto fehlgeschlagen: '+(e.message||e),'err'); } }
+  if(!failed) setSync(`${n} Fotos hochgeladen · ${gps} mit Ortsdaten`,'warn'); await renderThumbs();
 }
 async function signed(paths){ const missing=paths.filter(p=>!signedCache[p]); if(missing.length){ const {data}=await sb.storage.from('fotos').createSignedUrls(missing,3600); (data||[]).forEach(x=>{ if(x.signedUrl) signedCache[x.path]=x.signedUrl; }); } return paths.map(p=>signedCache[p]); }
 async function renderThumbs(){ const el=$('#thumbs'); const tg=photoTarget; if(!el||!tg) return; if(!tg.obj.photos.length){ el.innerHTML=''; return; } const urls=await signed(tg.obj.photos.map(p=>p.path)); const el2=$('#thumbs'); if(el2) el2.innerHTML=urls.map(u=>u?`<img src="${u}" alt="">`:`<span class="ph"></span>`).join(''); }
@@ -459,9 +473,19 @@ const foot = inner => `<div class="foot"><div class="in">${inner}</div></div>`;
 function vConfig(){ return bar('Reise-Erfassung','Einrichtung nötig',null,null,{noMenu:true}) + `<main><div class="banner">Die Datei ist noch nicht mit Supabase verbunden.</div></main>`; }
 function vLogin(){ return bar('Reise-Erfassung','Anmelden',null,null,{noMenu:true}) + `<main class="form">${view.msg?`<div class="banner">${esc(view.msg)}</div>`:''}<div class="card"><label class="f">E-Mail</label><input type="email" id="email" autocomplete="username" inputmode="email"><label class="f">Passwort</label><input type="password" id="pw" autocomplete="current-password"><div class="err" id="errLogin"></div><button class="btn inline" data-act="login">Anmelden</button><div class="hint" style="text-align:right">Version ${VERSION}</div></div></main>`; }
 function miniLine(d){ const n=d.etappen.length; const w=300; const pts=n?d.etappen.map((e,i)=>({x:n===1?w/2:20+i*((w-40)/(n-1)),ort:e.ort})):[]; return `<svg viewBox="0 0 ${w} 34" width="100%" height="34" aria-hidden="true"><line x1="6" y1="12" x2="${w-6}" y2="12" stroke="#D2CDC3" stroke-width="1.5"/><circle cx="6" cy="12" r="3" fill="#D2CDC3"/><circle cx="${w-6}" cy="12" r="3" fill="#D2CDC3"/>${pts.map((p,i)=>`<circle cx="${p.x}" cy="12" r="5" fill="${colorOf(i)}"/><text x="${p.x}" y="30" font-size="10" text-anchor="middle" fill="#7B776F" font-family="-apple-system,system-ui,sans-serif">${esc((p.ort||'?').slice(0,12))}</text>`).join('')}</svg>`; }
+function tileInner(t){
+  const d=t.data, s=tripSummary(d), cur=d.currency||'EUR', rate=num(d.rateFromEur), c=s.c;
+  const eur=v=>(cur!=='EUR'&&rate)?` ≈ ${fmt(v/rate)} €`:'';
+  return `<div class="tin"><div class="grid">
+    <div><span>Kategorien</span>${esc((d.categories||[]).join(', ')||'–')}</div><div><span>Zeitraum</span>${d.from?`${fmtShort(d.from)} – ${fmtShort(d.to)} · ${s.days} Tage`:'–'}</div>
+    <div><span>Start / Ende</span>${esc(d.startFrom||'–')} → ${esc(d.endDiff?(d.endTo||'–'):(d.startFrom||'–'))}</div><div><span>Währung</span>${esc(cur)}${cur!=='EUR'?(rate?` · 1 € = ${rate}`:' · Kurs fehlt'):''}</div>
+    <div><span>Gesamt · 2 Personen</span>${fmt(c.gesamt)} ${esc(cur)}${eur(c.gesamt)}</div><div><span>Pro Person und Tag</span>${s.days&&c.gesamt?fmt(c.gesamt/2/s.days)+' '+esc(cur)+eur(c.gesamt/2/s.days):'–'}</div>
+    <div><span>Weitere Kosten</span>${(d.extras||[]).length?`${d.extras.length} Positionen · ${fmt(extrasTotal(d))} ${esc(cur)}`:'–'}</div><div><span>Bewertung</span>${s.avg!=null?starsHTML(s.avg)+' '+s.avg.toFixed(1):`${s.rated} von 5 bewertet`}</div>
+  </div><div class="tools"><button class="chip" data-act="editTripFrom" data-id="${t.id}">Grunddaten bearbeiten</button><button class="chip on" data-act="openTrip" data-id="${t.id}">Storyline öffnen</button></div></div>`;
+}
 function vHome(){
-  const tiles=trips.map(t=>{ const d=t.data, s=tripSummary(d);
-    return `<div class="tile" role="button" tabindex="0" data-act="openTrip" data-id="${t.id}"><p class="t1">${esc(d.title||'Ohne Titel')}</p><p class="t2">${esc([d.countries, d.from?`${fmtShort(d.from)} – ${fmtShort(d.to)}${s.days?` · ${s.days} Tage`:''}`:'Zeitraum offen'].filter(Boolean).join(' · '))}</p><div class="chips">${(d.categories||[]).slice(0,3).map(k=>`<span class="chip soft">${esc(k)}</span>`).join('')}${(d.categories||[]).length>3?`<span class="chip soft">+${d.categories.length-3}</span>`:''}${s.level?`<span class="chip soft">${s.level}${s.perDay?` · ${fmt(s.perDay)} € p. P./Tag`:''}</span>`:''}<span class="chip soft">${s.avg!=null?starsHTML(s.avg)+' '+s.avg.toFixed(1):'noch keine Bewertung'}</span><span class="chip soft">${d.etappen.length} Orte · ${s.erl} Erlebnisse</span></div>${miniLine(d)}</div>`; }).join('');
+  const tiles=trips.map(t=>{ const d=t.data, s=tripSummary(d), open=view.openTile===t.id;
+    return `<div class="tile ${open?'open':''}"><div class="th" role="button" tabindex="0" data-act="toggleTile" data-id="${t.id}"><p class="t1">${esc(d.title||'Ohne Titel')}</p><p class="t2">${esc([d.countries, d.from?`${fmtShort(d.from)} – ${fmtShort(d.to)}${s.days?` · ${s.days} Tage`:''}`:'Zeitraum offen'].filter(Boolean).join(' · '))}</p><div class="chips">${(d.categories||[]).slice(0,3).map(k=>`<span class="chip soft">${esc(k)}</span>`).join('')}${(d.categories||[]).length>3?`<span class="chip soft">+${d.categories.length-3}</span>`:''}${s.level?`<span class="chip soft">${s.level}${s.perDay?` · ${fmt(s.perDay)} € p. P./Tag`:''}</span>`:''}<span class="chip soft">${s.avg!=null?starsHTML(s.avg)+' '+s.avg.toFixed(1):'noch keine Bewertung'}</span><span class="chip soft">${d.etappen.length} Orte · ${s.erl} Erlebnisse</span></div>${miniLine(d)}</div>${open?tileInner(t):''}</div>`; }).join('');
   return bar('Reisen', user?user.email:'', null, null, {plus:'newTrip'}) + `<main class="home">${tiles?`<div class="list">${tiles}</div>`:`<div class="card"><div class="empty">Noch keine Reise. Tippe auf + und beginne mit eurer letzten – die wird der Testdatensatz.</div></div>`}</main>`;
 }
 function vTripEdit(){
@@ -524,19 +548,13 @@ function vTrip(t){
   nodes.push(`<div class="node end"><span class="dot"></span><div class="txt">Ende${d.to?' · '+fmtDate(d.to):''}${(d.endDiff?d.endTo:d.startFrom)?' · '+esc(d.endDiff?d.endTo:d.startFrom):''}</div></div>`);
   if(d.etappen.length) nodes.push(`<button class="addleg" data-act="newOrt" data-i="${d.etappen.length}">+ Ort</button>`);
   const kp=(()=>{ const erl=allErl(d); const ts=erl.map(x=>x.seconds).filter(x=>x!=null); const a=ts.length?Math.round(ts.reduce((p,q)=>p+q,0)/ts.length):null; const rat=[...d.etappen.map(e=>avg(e.unt&&e.unt.ratings)),...erl.map(x=>avg(x.ratings))].filter(x=>x!=null); const f=rat.filter(x=>x>=4.5).length; return {a, q:rat.length?Math.round(100*f/rat.length):0}; })();
-  return bar(d.title||'Reise', [d.countries, d.from?`${fmtShort(d.from)} – ${fmtShort(d.to)}`:'' , s.days?`${s.days} Tage`:''].filter(Boolean).join(' · '), 'home') + `<main class="two"><div class="col">
-    <div class="card"><div class="grid">
-      <div><span>Kategorien</span>${esc((d.categories||[]).join(', ')||'–')}</div><div><span>Preissegment</span>${s.level?s.level+(s.perDay?` · ${fmt(s.perDay)} € p. P./Tag`:''):'–'}</div>
-      <div><span>Bewertung</span>${s.avg!=null?starsHTML(s.avg)+' '+s.avg.toFixed(1):`${s.rated} von 5 bewertet`}</div><div><span>Orte · Erlebnisse</span>${d.etappen.length} · ${s.erl}${c.missing?` · ${c.missing} ohne Preis`:''}</div>
-      <div><span>Währung</span>${esc(cur)}${cur!=='EUR'?(rate?` · 1 € = ${rate} ${esc(cur)}`:' · Kurs fehlt'):''}</div><div><span>Start / Ende</span>${esc(d.startFrom||'–')} → ${esc(d.endDiff?(d.endTo||'–'):(d.startFrom||'–'))}</div>
-    </div><button class="btn ghost inline" data-act="editTrip">Grunddaten bearbeiten</button></div>
-    <div class="card"><h2>Rechnungsschluss · 2 Personen · ${esc(cur)}</h2><table>
+  return bar(d.title||'Reise', [d.countries, d.from?`${fmtShort(d.from)} – ${fmtShort(d.to)}`:'' , s.days?`${s.days} Tage`:''].filter(Boolean).join(' · '), 'home') + `<main class="two"><div class="col"><div class="card"><div class="hrow"><h2>Storyline</h2><button class="lnk" data-act="editMode">${em?'Fertig':'Bearbeiten'}</button></div><div class="sl">${nodes.join('')}</div></div></div>
+    <div class="col"><div class="card"><details ${view.billOpen?'open':''} id="billDetails" style="border:0;padding:0;margin:0"><summary><span style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:500">Rechnungsschluss · ${fmt(c.gesamt)} ${esc(cur)}</span></summary><table style="margin-top:12px">
       <tr><td>Transport</td><td>${fmt(c.transport)}${eur(c.transport)}</td></tr><tr><td>Unterkunft</td><td>${fmt(c.unterkunft)}${eur(c.unterkunft)}</td></tr><tr><td>Essen & Trinken</td><td>${fmt(c.essen)}${eur(c.essen)}</td></tr><tr><td>Ausflüge & Sehenswürdigkeiten</td><td>${fmt(c.aktiv)}${eur(c.aktiv)}</td></tr>
       ${(d.extras||[]).map(x=>`<tr><td>${esc(x.title||'Position')}${(num(x.qty)||1)!==1?` × ${x.qty}`:''}</td><td>${fmt(extraSum(x))}${eur(extraSum(x))}</td></tr>`).join('')}
-      <tr class="sum"><td>Gesamt</td><td>${fmt(c.gesamt)}${eur(c.gesamt)}</td></tr><tr><td>Pro Person</td><td>${fmt(c.gesamt/2)}${eur(c.gesamt/2)}</td></tr><tr><td>Pro Person und Tag</td><td>${s.days?fmt(c.gesamt/2/s.days)+eur(c.gesamt/2/s.days):'– (Zeitraum fehlt)'}</td></tr></table>
+      <tr class="sum"><td>Gesamt · 2 Personen</td><td>${fmt(c.gesamt)}${eur(c.gesamt)}</td></tr><tr><td>Pro Person</td><td>${fmt(c.gesamt/2)}${eur(c.gesamt/2)}</td></tr><tr><td>Pro Person und Tag</td><td>${s.days?fmt(c.gesamt/2/s.days)+eur(c.gesamt/2/s.days):'– (Zeitraum fehlt)'}</td></tr></table>
       ${c.missing?`<div class="hint">${c.missing} Einträge ohne Preis – Summe unvollständig.</div>`:''}
-      <details><summary>Kennzahlen</summary><div class="kpi" style="margin-top:10px"><div class="${kp.a!=null&&kp.a>120?'warn':''}"><b>${kp.a!=null?mmss(kp.a):'–'}</b><span>Ø Erfassungszeit Erlebnis</span></div><div class="${kp.q>20?'warn':''}"><b>${kp.q} %</b><span>Anteil Bestnoten</span></div></div></details></div>
-    </div><div class="col"><div class="card"><div class="hrow"><h2>Storyline</h2><button class="lnk" data-act="editMode">${em?'Fertig':'Bearbeiten'}</button></div><div class="sl">${nodes.join('')}</div></div>${mapCard(d)}</div></main>`;
+      <div class="kpi" style="margin-top:12px"><div class="${kp.a!=null&&kp.a>120?'warn':''}"><b>${kp.a!=null?mmss(kp.a):'–'}</b><span>Ø Erfassungszeit Erlebnis</span></div><div class="${kp.q>20?'warn':''}"><b>${kp.q} %</b><span>Anteil Bestnoten</span></div></div></details></div>${mapCard(d)}</div></main>`;
 }
 function wegSection(w, toName){
   return `<div class="card"><h3>Anreise${toName?' nach '+esc(toName):''}</h3>
@@ -647,7 +665,7 @@ function render(){
   const anyPending=Object.values(pending).some(a=>a&&a.length); setSync(anyPending?'Speichert …':(user?'Gespeichert':''));
   if(view.name==='erl'){ photoTarget={obj:draft,id:draft.id}; if(draft.isNew){ if(!timer.iv) timer.iv=setInterval(tick,1000); tick(); } renderThumbs(); }
   else if(view.name==='ortEdit'){ photoTarget={obj:ortDraft.unt,id:ortDraft.id+'-u'}; renderThumbs(); } else photoTarget=null;
-  if(view.name==='trip'&&t){ const md=$('#mapDetails'); if(md){ md.addEventListener('toggle',()=>{ mapOpen=md.open; if(md.open) renderMap(t); }); if(md.open) renderMap(t); } } else if(map){ try{ map.remove(); }catch(e){} map=null; }
+  if(view.name==='trip'&&t){ const bd=$('#billDetails'); if(bd) bd.addEventListener('toggle',()=>{ view.billOpen=bd.open; }); const md=$('#mapDetails'); if(md){ md.addEventListener('toggle',()=>{ mapOpen=md.open; if(md.open) renderMap(t); }); if(md.open) renderMap(t); } } else if(map){ try{ map.remove(); }catch(e){} map=null; }
 }
 function segToggle(btn,single=true){ if(single){ [...btn.parentElement.children].forEach(b=>b.classList.remove('on')); btn.classList.add('on'); } else btn.classList.toggle('on'); }
 
@@ -665,8 +683,8 @@ const actions={
   async setTaskStatus(d){ const x=tasks.find(t=>t.id===d.id); if(!x) return; const old=x.status; x.status=d.v; render(); const {error}=await sb.from('aufgaben').update({status:d.v, updated_at:new Date().toISOString()}).eq('id',d.id); if(error){ x.status=old; setSync('Nicht gespeichert','err'); render(); } },
   async delTask(d){ const {error}=await sb.from('aufgaben').delete().eq('id',d.id); if(error){ setSync('Löschen fehlgeschlagen','err'); return; } tasks=tasks.filter(t=>t.id!==d.id); render(); },
   newTrip(){ tripDraft=newTripData(); editingTripId=null; calState.td={month:today().slice(0,7)}; go({name:'tripEdit'}); },
-  editTrip(){ const t=trip(view.tripId); tripDraft=clone(t.data); editingTripId=t.id; calState.td={month:(tripDraft.from||today()).slice(0,7)}; go({name:'tripEdit',tripId:t.id}); },
-  backToTrip(){ go({name:'trip',tripId:view.tripId||editingTripId,openEt:view.openEt}); },
+  editTrip(){ const t=trip(view.tripId); tripDraft=clone(t.data); editingTripId=t.id; calState.td={month:(tripDraft.from||today()).slice(0,7)}; const fh=!!view.fromHome; go({name:'tripEdit',tripId:t.id,fromHome:fh}); },
+  backToTrip(){ if(view.fromHome){ go({name:'home',openTile:editingTripId}); return; } go({name:'trip',tripId:view.tripId||editingTripId,openEt:view.openEt}); },
   toggleCatTrip(d,b){ const a=tripDraft.categories,i=a.indexOf(d.v); i>=0?a.splice(i,1):a.push(d.v); segToggle(b,false); },
   toggleEndDiff(){ tripDraft.endDiff=!tripDraft.endDiff; render(); },
   addExtra(){ tripDraft.extras.push(newExtra()); render(); const els=document.querySelectorAll('#extras .exrow input[type=text]'); if(els.length) els[els.length-1].focus(); },
@@ -677,11 +695,13 @@ const actions={
   async fetchRate(){ const code=tripDraft.currency; const h=$('#rateHint'); if(code==='EUR'){ if(h) h.textContent='Reisewährung ist Euro, kein Kurs nötig.'; return; } if(!ECB.has(code)){ if(h) h.textContent='Für diese Währung kein EZB-Kurs – bitte manuell eintragen.'; return; } const date=tripDraft.from||'latest'; if(h) h.textContent='Kurs wird geladen …'; try{ const r=await fetch(`https://api.frankfurter.app/${date}?from=EUR&to=${code}`); const j=await r.json(); const v=j.rates&&j.rates[code]; if(v==null) throw new Error('kein Kurs'); tripDraft.rateFromEur=String(v); const i=$('#rateInput'); if(i) i.value=v; if(h) h.textContent=`EZB-Kurs vom ${fmtDate(j.date)}: 1 EUR = ${v} ${code}`; }catch(e){ if(h) h.textContent='Kurs konnte nicht geladen werden – bitte manuell eintragen.'; } },
   async saveTrip(){
     if(!tripDraft.title.trim()){ $('#errTrip').classList.add('show'); return; } tripDraft.currency=(tripDraft.currency||'EUR').toUpperCase();
-    if(editingTripId){ const val=clone(tripDraft); mutate(editingTripId, d=>{ ['title','countries','categories','from','to','currency','rateFromEur','extras','startFrom','startLat','startLng','endDiff','endTo','endLat','endLng'].forEach(k=>{ d[k]=clone(val[k]); }); }); go({name:'trip',tripId:editingTripId}); return; }
+    if(editingTripId){ const val=clone(tripDraft); const fh=!!view.fromHome; mutate(editingTripId, d=>{ ['title','countries','categories','from','to','currency','rateFromEur','extras','startFrom','startLat','startLng','endDiff','endTo','endLat','endLng'].forEach(k=>{ d[k]=clone(val[k]); }); }); go(fh?{name:'home',openTile:editingTripId}:{name:'trip',tripId:editingTripId}); return; }
     const btn=$('#btnSaveTrip'); btn.disabled=true; setSync('Speichert …'); const {data,error}=await sb.from('reisen').insert({data:tripDraft, updated_by:user.id}).select('id,data,version').single();
-    if(error){ btn.disabled=false; setSync('Nicht gespeichert: '+error.message,'err'); return; } if(!trip(data.id)) trips.unshift(data); go({name:'trip',tripId:data.id});
+    if(error){ btn.disabled=false; setSync('Nicht gespeichert: '+error.message,'err'); return; } if(!trip(data.id)) trips.unshift(data); go({name:'home',openTile:data.id});
   },
   openTrip(d){ go({name:'trip',tripId:d.id}); },
+  toggleTile(d){ view.openTile=view.openTile===d.id?null:d.id; render(); },
+  editTripFrom(d){ view.tripId=d.id; view.fromHome=true; actions.editTrip(); },
   openOrt(d){ view.openEt=view.openEt===d.id?null:d.id; view.etId=d.id; render(); const n=document.querySelector('.node.open'); if(n) n.scrollIntoView({block:'start',behavior:'smooth'}); },
   editMode(){ view.editMode=!view.editMode; render(); },
   newOrt(d){ const t=trip(view.tripId); const i=parseInt(d.i); ortDraft=newOrt(t.data,i); ortDraft._insertAt=i; wegDraft=ortDraft.weg; calState.od={month:(ortDraft.arrive||t.data.from||today()).slice(0,7)}; go({name:'ortEdit',tripId:view.tripId}); },
